@@ -26,24 +26,28 @@ All data are generated synthetically within the script. No industrial or confide
 
 ## Associated manuscript
 
-This repository accompanies the manuscript:"Role and relevance of Data Analytics in beverage and brewing industry"
-currently under peer review 
+This repository accompanies the manuscript: "Role and relevance of Data Analytics in beverage and brewing industry"
+currently under peer review.
 
 ## Requirements
 
-- [R]https://www.r-project.org/ 
+- Install [R](https://www.r-project.org/)
 - Required packages are:
-```pkgs <- c("dplyr", "qcc", "xgboost", "pROC", "corrplot", "ggplot2", "patchwork", 
+
+```
+pkgs <- c("dplyr", "qcc", "xgboost", "pROC", "corrplot", "ggplot2", "patchwork", 
           "scales", "grid", "SHAPforxgboost")
-  pkgs <- setdiff(pkgs, installed.packages()[,"Package"])```
+pkgs <- setdiff(pkgs, installed.packages()[,"Package"])
  
- 
+
+
+```
 ## Authors
 
-Erika Francesch-Domenech
-Ana Isabel Fernandez-Calviño
-Salvador Naya-Fernández
-Javier Tarrío-Saavedra
+- Erika Francesch-Domenech
+- Ana Isabel Fernandez-Calviño
+- Salvador Naya-Fernández
+- Javier Tarrío-Saavedra
 
 ## Usage
 
@@ -51,3 +55,4 @@ Run:
 
 ```r
 source("case_study_code_synthetic_data.R")
+```
