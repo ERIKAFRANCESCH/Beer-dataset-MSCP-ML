@@ -49,6 +49,10 @@ pkgs <- setdiff(pkgs, installed.packages()[,"Package"])
 - Salvador Naya-Fernández
 - Javier Tarrío-Saavedra
 
+## Citation
+This code is archived on Zenodo: 
+DOI: https://doi.org/10.5281/zenodo.21917783
+
 ## Usage
 
 Run:
