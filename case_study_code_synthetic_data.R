@@ -211,6 +211,27 @@ corrplot(
 )
 
 ############################################################
+# TRAIN-TEST SPLIT BEFORE PREPROCESSING OR MODEL FITTING
+############################################################
+
+set.seed(12345)
+
+train_idx <- beer_batches %>%
+  group_by(calidad) %>%
+  slice_sample(prop = 0.80) %>%
+  pull(batch)
+
+train <- beer_batches %>%
+  filter(batch %in% train_idx)
+
+test <- beer_batches %>%
+  filter(!batch %in% train_idx)
+
+# In-control reference data used to fit the PCA-MSPC model
+reference_train <- train %>%
+  filter(fault == 0)
+
+############################################################
 # 2) MSPC: PCA + HOTELLING T2 + SPE(Q)
 ############################################################
 
@@ -226,54 +247,178 @@ predictors <- c(
   "proteinas_gL_final"
 )
 
-pca_model <- prcomp(beer_batches[, predictors], scale. = TRUE)
+############################################################
+# PCA-MSPC MODEL FITTED ONLY ON IN-CONTROL TRAINING BATCHES
+############################################################
 
-explained_var <- cumsum(pca_model$sdev^2 / sum(pca_model$sdev^2))
-plot(explained_var, type = "b", main = "Explained Variance PCA")
+pca_model <- prcomp(
+  reference_train[, predictors],
+  center = TRUE,
+  scale. = TRUE
+)
 
+explained_var <- cumsum(
+  pca_model$sdev^2 / sum(pca_model$sdev^2)
+)
+
+plot(
+  explained_var,
+  type = "b",
+  main = "Explained Variance PCA"
+)
+
+# Minimum number of PCs explaining at least 85% cumulative variance
 ncomp <- which(explained_var >= 0.85)[1]
-if (is.na(ncomp) || length(ncomp) == 0) ncomp <- 4
 
-T_scores <- pca_model$x[, 1:ncomp, drop = FALSE]
+if (is.na(ncomp) || length(ncomp) == 0) {
+  ncomp <- 4
+}
+
+print(paste("Number of retained principal components:", ncomp))
+print(paste(
+  "Cumulative explained variance:",
+  round(explained_var[ncomp], 4)
+))
+
 P_loadings <- pca_model$rotation[, 1:ncomp, drop = FALSE]
 Lambda <- diag(pca_model$sdev[1:ncomp]^2)
 
-T2 <- apply(T_scores, 1, function(ti) {
-  as.numeric(t(ti) %*% solve(Lambda) %*% ti)
-})
+############################################################
+# FUNCTION TO APPLY THE REFERENCE PCA MODEL
+############################################################
 
-beer_batches$T2 <- T2
+apply_mspc_model <- function(new_data, pca_model, predictors,
+                             ncomp, P_loadings, Lambda) {
+  
+  # Apply centre and scale estimated only from reference_train
+  X_scaled <- scale(
+    new_data[, predictors],
+    center = pca_model$center,
+    scale = pca_model$scale
+  )
+  
+  # Project observations onto the retained PCA subspace
+  T_scores <- X_scaled %*% P_loadings
+  
+  # Hotelling T2
+  T2 <- apply(T_scores, 1, function(ti) {
+    as.numeric(t(ti) %*% solve(Lambda) %*% ti)
+  })
+  
+  # Reconstruct observations and calculate SPE/Q
+  X_hat <- T_scores %*% t(P_loadings)
+  residuals <- X_scaled - X_hat
+  Q <- rowSums(residuals^2)
+  
+  data.frame(
+    T2 = T2,
+    Q = Q
+  )
+}
 
-# T2 limit
-n <- nrow(T_scores)
+############################################################
+# CONTROL LIMITS ESTIMATED ONLY FROM REFERENCE TRAINING DATA
+############################################################
+
+reference_scores <- apply_mspc_model(
+  new_data = reference_train,
+  pca_model = pca_model,
+  predictors = predictors,
+  ncomp = ncomp,
+  P_loadings = P_loadings,
+  Lambda = Lambda
+)
+
+# Hotelling T2 limit: F-distribution approximation, 95%
+n_ref <- nrow(reference_train)
 alpha_T2 <- 0.95
-T2_limit <- (ncomp * (n - 1) / (n - ncomp)) * qf(alpha_T2, ncomp, n - ncomp)
 
-# Q / SPE residuals
-X_scaled <- scale(beer_batches[, predictors])
-X_hat <- T_scores %*% t(P_loadings)
-E <- X_scaled - X_hat
+T2_limit <- (
+  ncomp * (n_ref - 1) / (n_ref - ncomp)
+) * qf(
+  alpha_T2,
+  ncomp,
+  n_ref - ncomp
+)
 
-Q <- rowSums(E^2)
-beer_batches$Q <- Q
+# SPE/Q limit: Jackson-Mudholkar approximation, 99%
+residual_eigenvalues <- pca_model$sdev[
+  (ncomp + 1):length(pca_model$sdev)
+]^2
 
-eig_vals <- pca_model$sdev[(ncomp + 1):length(pca_model$sdev)]^2
-eig_vals <- eig_vals[!is.na(eig_vals)]
+residual_eigenvalues <- residual_eigenvalues[
+  !is.na(residual_eigenvalues)
+]
 
-theta1 <- sum(eig_vals)
-theta2 <- sum(eig_vals^2)
-theta3 <- sum(eig_vals^3)
+theta1 <- sum(residual_eigenvalues)
+theta2 <- sum(residual_eigenvalues^2)
+theta3 <- sum(residual_eigenvalues^3)
 
-h0 <- 1 - (2 * theta1 * theta3) / (3 * theta2^2)
+h0 <- 1 - (
+  2 * theta1 * theta3
+) / (
+  3 * theta2^2
+)
+
 z <- qnorm(0.99)
 
 Q_limit <- theta1 * (
-  (z * sqrt(2 * theta2 * h0^2) / theta1) +
+  (
+    z * sqrt(2 * theta2 * h0^2) / theta1
+  ) +
     1 +
-    (theta2 * h0 * (h0 - 1)) / (theta1^2)
+    (
+      theta2 * h0 * (h0 - 1)
+    ) / theta1^2
 )^(1 / h0)
 
-beer_batches$Q_limit <- Q_limit
+############################################################
+# APPLY THE FIXED PCA-MSPC MODEL TO TRAIN AND TEST
+############################################################
+
+train_mspc <- apply_mspc_model(
+  new_data = train,
+  pca_model = pca_model,
+  predictors = predictors,
+  ncomp = ncomp,
+  P_loadings = P_loadings,
+  Lambda = Lambda
+)
+
+test_mspc <- apply_mspc_model(
+  new_data = test,
+  pca_model = pca_model,
+  predictors = predictors,
+  ncomp = ncomp,
+  P_loadings = P_loadings,
+  Lambda = Lambda
+)
+
+train$T2 <- train_mspc$T2
+train$Q <- train_mspc$Q
+
+test$T2 <- test_mspc$T2
+test$Q <- test_mspc$Q
+
+train$T2_outlier <- as.integer(train$T2 > T2_limit)
+train$Q_outlier <- as.integer(train$Q > Q_limit)
+train$MSPC_outlier <- as.integer(
+  train$T2_outlier == 1 | train$Q_outlier == 1
+)
+
+test$T2_outlier <- as.integer(test$T2 > T2_limit)
+test$Q_outlier <- as.integer(test$Q > Q_limit)
+test$MSPC_outlier <- as.integer(
+  test$T2_outlier == 1 | test$Q_outlier == 1
+)
+
+# Reconstruct the complete dataset only for plotting
+beer_batches <- bind_rows(train, test) %>%
+  arrange(batch)
+
+print(paste("Reference training batches:", n_ref))
+print(paste("T2 control limit:", round(T2_limit, 4)))
+print(paste("Q control limit:", round(Q_limit, 4)))
 
 # MSPC flags
 beer_batches$T2_outlier <- ifelse(beer_batches$T2 > T2_limit, 1, 0)
@@ -308,9 +453,6 @@ features <- c(
 
 set.seed(12345)
 
-train_idx <- sample(seq_len(nrow(beer_batches)), size = floor(0.8 * nrow(beer_batches)))
-train <- beer_batches[train_idx, ]
-test  <- beer_batches[-train_idx, ]
 
 X_train <- as.matrix(train[, features])
 X_test  <- as.matrix(test[, features])
@@ -394,9 +536,18 @@ ROC <- pROC::roc(
 )
 
 AUC <- as.numeric(pROC::auc(ROC))
-best_thresh <- as.numeric(pROC::coords(ROC, "best", ret = "threshold"))
 
-pred_class <- ifelse(pred > best_thresh, 1, 0)
+decision_threshold <- 0.50
+
+pred_class <- ifelse(
+  pred >= decision_threshold,
+  1,
+  0
+)
+
+# Positive class:
+# calidad = 1 means acceptable quality
+# calidad = 0 means non-acceptable quality
 
 conf_matrix <- table(pred_class, real = y_test)
 
@@ -421,7 +572,7 @@ print(conf_matrix)
 print(accuracy)
 print(AUC)
 print(balanced_accuracy)
-print(best_thresh)
+print(decision_threshold)
 print(best_nrounds)
 print(mcc)
 
@@ -469,7 +620,7 @@ test$pred_prob <- pred
 test$pred_class <- pred_class
 
 # Rebuild MSPC status directly on the test set
-test$MSPC_outlier <- ifelse(test$T2 > T2_limit | test$Q > Q_limit, 1, 0)
+#test$MSPC_outlier <- ifelse(test$T2 > T2_limit | test$Q > Q_limit, 1, 0)
 
 test$hybrid_state <- "OK"
 test$hybrid_state[test$MSPC_outlier == 0 & test$pred_class == 0] <- "RISK"
@@ -483,6 +634,17 @@ test$hybrid_state <- factor(
 
 print(table(test$hybrid_state, test$fault))
 
+ncomp
+explained_var[ncomp]
+T2_limit
+Q_limit
+decision_threshold
+best_nrounds
+AUC
+accuracy
+balanced_accuracy
+TPR
+TNR
 ############################################################
 # 6) HARMONIZED MULTIPANEL FIGURE
 ############################################################
@@ -569,7 +731,7 @@ pA <- ggplot(
   ) +
   theme_case +
   theme(
-    legend.position = c(0.80, 0.92),
+    legend.position = c(0.60, 0.35),
     legend.justification = c(0, 1),
     legend.direction = "horizontal"
   )
@@ -725,7 +887,7 @@ pD <- ggplot(
   ) +
   theme_case +
   theme(
-    legend.position = c(0.70, 0.10),
+    legend.position = c(0.60, 0.22),
     legend.justification = c(0.5, 0),
     legend.direction = "horizontal"
   )
@@ -753,3 +915,4 @@ ggsave(
   units = "in",
   dpi = 600
 )
+
